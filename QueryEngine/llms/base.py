@@ -1,5 +1,7 @@
 """
 Unified OpenAI-compatible LLM client for the Query Engine, with retry support.
+
+支持 DeepSeek 备用模型：当主模型触发内容安全审核时，自动切换到 DeepSeek 重试。
 """
 
 import os
@@ -9,6 +11,21 @@ from typing import Any, Dict, Optional, Generator
 from loguru import logger
 
 from openai import OpenAI
+
+
+def _get_deepseek_config() -> Optional[Dict[str, str]]:
+    """获取 DeepSeek 备用配置"""
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    model_name = os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat")
+
+    if api_key:
+        return {
+            "api_key": api_key,
+            "base_url": base_url,
+            "model_name": model_name,
+        }
+    return None
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
@@ -62,26 +79,67 @@ class LLMClient:
             user_prompt = f"{time_prefix}\n{user_prompt}"
         else:
             user_prompt = time_prefix
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
 
-        allowed_keys = {"temperature", "top_p", "presence_penalty", "frequency_penalty", "stream"}
-        extra_params = {key: value for key, value in kwargs.items() if key in allowed_keys and value is not None}
+        try:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
 
-        timeout = kwargs.pop("timeout", self.timeout)
+            allowed_keys = {"temperature", "top_p", "presence_penalty", "frequency_penalty", "stream"}
+            extra_params = {key: value for key, value in kwargs.items() if key in allowed_keys and value is not None}
 
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            timeout=timeout,
-            **extra_params,
-        )
+            timeout = kwargs.pop("timeout", self.timeout)
 
-        if response.choices and response.choices[0].message:
-            return self.validate_response(response.choices[0].message.content)
-        return ""
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                timeout=timeout,
+                **extra_params,
+            )
+
+            if response.choices and response.choices[0].message:
+                return self.validate_response(response.choices[0].message.content)
+            return ""
+
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # 检测内容审查错误，使用 DeepSeek 备用模型
+            if 'inappropriate content' in error_msg or 'content policy' in error_msg:
+                logger.warning(f"内容审查触发，尝试使用 DeepSeek 备用模型...")
+
+                deepseek_config = _get_deepseek_config()
+                if not deepseek_config:
+                    logger.error("DeepSeek 配置未设置，无法使用备用模型")
+                    raise
+
+                try:
+                    # 创建 DeepSeek 客户端
+                    deepseek_client = OpenAI(
+                        api_key=deepseek_config["api_key"],
+                        base_url=deepseek_config["base_url"],
+                        max_retries=0,
+                    )
+
+                    response = deepseek_client.chat.completions.create(
+                        model=deepseek_config["model_name"],
+                        messages=messages,
+                        timeout=timeout,
+                        **extra_params,
+                    )
+
+                    if response.choices and response.choices[0].message:
+                        logger.info("DeepSeek 备用模型调用成功")
+                        return self.validate_response(response.choices[0].message.content)
+                    return ""
+
+                except Exception as deepseek_error:
+                    logger.error(f"DeepSeek 备用模型也失败: {deepseek_error}")
+                    raise  # 抛出原始错误，让上层处理
+
+            # 其他错误直接抛出
+            raise
 
     def stream_invoke(self, system_prompt: str, user_prompt: str, **kwargs) -> Generator[str, None, None]:
         """
@@ -134,24 +192,87 @@ class LLMClient:
     def stream_invoke_to_string(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
         """
         流式调用LLM并安全地拼接为完整字符串（避免UTF-8多字节字符截断）
-        
+
         Args:
             system_prompt: 系统提示词
             user_prompt: 用户提示词
             **kwargs: 额外参数（temperature, top_p等）
-            
+
         Returns:
             完整的响应字符串
         """
-        # 以字节形式收集所有块
-        byte_chunks = []
-        for chunk in self.stream_invoke(system_prompt, user_prompt, **kwargs):
-            byte_chunks.append(chunk.encode('utf-8'))
-        
-        # 拼接所有字节，然后一次性解码
-        if byte_chunks:
-            return b''.join(byte_chunks).decode('utf-8', errors='replace')
-        return ""
+        try:
+            # 以字节形式收集所有块
+            byte_chunks = []
+            for chunk in self.stream_invoke(system_prompt, user_prompt, **kwargs):
+                byte_chunks.append(chunk.encode('utf-8'))
+
+            # 拼接所有字节，然后一次性解码
+            if byte_chunks:
+                return b''.join(byte_chunks).decode('utf-8', errors='replace')
+            return ""
+
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # 检测内容审查错误，使用 DeepSeek 备用模型
+            if 'inappropriate content' in error_msg or 'content policy' in error_msg:
+                logger.warning(f"[stream] 内容审查触发，尝试使用 DeepSeek 备用模型...")
+
+                deepseek_config = _get_deepseek_config()
+                if not deepseek_config:
+                    logger.error("DeepSeek 配置未设置，无法使用备用模型")
+                    raise
+
+                try:
+                    # 创建 DeepSeek 客户端
+                    deepseek_client = OpenAI(
+                        api_key=deepseek_config["api_key"],
+                        base_url=deepseek_config["base_url"],
+                        max_retries=0,
+                    )
+
+                    # 获取当前时间（stream_invoke 会自动添加，这里手动构造 messages）
+                    current_time = datetime.now().strftime("%Y年%m月%d日%H时%M分")
+                    time_prefix = f"今天的实际时间是{current_time}"
+                    full_user_prompt = f"{time_prefix}\n{user_prompt}" if user_prompt else time_prefix
+
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": full_user_prompt},
+                    ]
+
+                    allowed_keys = {"temperature", "top_p", "presence_penalty", "frequency_penalty"}
+                    extra_params = {key: value for key, value in kwargs.items() if key in allowed_keys and value is not None}
+                    extra_params["stream"] = True
+
+                    timeout = kwargs.get("timeout", self.timeout)
+
+                    stream = deepseek_client.chat.completions.create(
+                        model=deepseek_config["model_name"],
+                        messages=messages,
+                        timeout=timeout,
+                        **extra_params,
+                    )
+
+                    byte_chunks = []
+                    for chunk in stream:
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            if delta and delta.content:
+                                byte_chunks.append(delta.content.encode('utf-8'))
+
+                    if byte_chunks:
+                        logger.info("DeepSeek 备用模型流式调用成功")
+                        return b''.join(byte_chunks).decode('utf-8', errors='replace')
+                    return ""
+
+                except Exception as deepseek_error:
+                    logger.error(f"DeepSeek 备用模型也失败: {deepseek_error}")
+                    raise  # 抛出原始错误，让上层处理
+
+            # 其他错误直接抛出
+            raise
 
     @staticmethod
     def validate_response(response: Optional[str]) -> str:

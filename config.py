@@ -106,6 +106,19 @@ class Settings(BaseSettings):
     MAX_PARAGRAPHS: int = Field(6, description="最大段落数")
     SEARCH_TIMEOUT: int = Field(240, description="单次搜索请求超时")
     MAX_CONTENT_LENGTH: int = Field(500000, description="搜索最大内容长度")
+
+    # ================== Redis / Celery 配置 ====================
+    REDIS_HOST: str = Field("127.0.0.1", description="Redis 服务器地址")
+    REDIS_PORT: int = Field(6379, description="Redis 端口号")
+    REDIS_DB: int = Field(10, description="Redis 数据库编号（BettaFish 使用 DB 10）")
+    REDIS_PASSWORD: Optional[str] = Field(None, description="Redis 密码（可选）")
+
+    @property
+    def REDIS_URL(self) -> str:
+        """构建 Redis 连接 URL"""
+        if self.REDIS_PASSWORD:
+            return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
     
     model_config = ConfigDict(
         env_file=ENV_FILE,

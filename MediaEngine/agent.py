@@ -189,20 +189,31 @@ class DeepSearchAgent:
     def _process_paragraphs(self):
         """处理所有段落"""
         total_paragraphs = len(self.state.paragraphs)
-        
+
         for i in range(total_paragraphs):
             logger.info(f"\n[步骤 2.{i+1}] 处理段落: {self.state.paragraphs[i].title}")
             logger.info("-" * 50)
-            
-            # 初始搜索和总结
-            self._initial_search_and_summary(i)
-            
-            # 反思循环
-            self._reflection_loop(i)
-            
-            # 标记段落完成
-            self.state.paragraphs[i].research.mark_completed()
-            
+
+            try:
+                # 初始搜索和总结
+                self._initial_search_and_summary(i)
+
+                # 反思循环
+                self._reflection_loop(i)
+
+                # 标记段落完成
+                self.state.paragraphs[i].research.mark_completed()
+            except Exception as e:
+                # 非致命性错误：跳过当前段落，继续处理其他段落
+                error_msg = str(e)
+                if "inappropriate content" in error_msg.lower() or "content filter" in error_msg.lower():
+                    logger.warning(f"  ⚠️ 段落 {i+1} 触发内容安全审核，跳过该段落: {error_msg[:100]}")
+                else:
+                    logger.error(f"  ❌ 段落 {i+1} 处理失败，跳过该段落: {error_msg[:200]}")
+                # 标记段落为失败状态但继续执行
+                self.state.paragraphs[i].latest_summary = f"[该段落处理失败: {error_msg[:100]}]"
+                continue
+
             progress = (i + 1) / total_paragraphs * 100
             logger.info(f"段落处理完成 ({progress:.1f}%)")
     
@@ -435,6 +446,164 @@ class DeepSearchAgent:
         """保存状态到文件"""
         self.state.save_to_file(filepath)
         logger.info(f"状态已保存到 {filepath}")
+
+    # ===== Phased 模式方法（用于 Orchestrator 模式）=====
+
+    def generate_plan(self, query: str, guidance: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Plan 阶段 - 生成研究计划
+
+        调用内部的 _generate_report_structure()，返回:
+        - paragraphs: 报告结构
+        - state_dict: 完整 State 序列化（供 Research 阶段恢复）
+
+        Args:
+            query: 研究查询
+            guidance: Orchestrator 提供的指导（可选）
+
+        Returns:
+            Plan 数据字典
+        """
+        logger.info(f"[Phased] 开始 Plan 阶段: {query}")
+
+        # 重置状态
+        self.state = State()
+
+        # 如果有 Guidance，记录日志（未来可扩展处理逻辑）
+        if guidance:
+            logger.info(f"[Phased] 收到 Plan Guidance: {guidance[:100]}...")
+
+        # 调用现有的 _generate_report_structure
+        self._generate_report_structure(query)
+
+        # 返回 Plan 数据（包含完整 state_dict）
+        return {
+            'query': self.state.query,
+            'report_title': self.state.report_title,
+            'paragraphs': [{'title': p.title, 'content': p.content} for p in self.state.paragraphs],
+            'paragraph_count': len(self.state.paragraphs),
+            'state_dict': self.state.to_dict()
+        }
+
+    def execute_research(self, plan: Dict[str, Any], guidance: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Research 阶段 - 基于 Plan 执行研究
+
+        从 plan['state_dict'] 恢复状态，调用 _process_paragraphs()
+
+        Args:
+            plan: Plan 阶段返回的数据（必须包含 state_dict）
+            guidance: Orchestrator 提供的指导（可选）
+
+        Returns:
+            Research 数据字典
+        """
+        logger.info(f"[Phased] 开始 Research 阶段")
+
+        # 从 Plan 恢复状态
+        state_dict = plan.get('state_dict')
+        if not state_dict:
+            raise ValueError("Plan 数据缺少 state_dict")
+        self.state = State.from_dict(state_dict)
+
+        # 保存 Guidance 供后续使用（可选扩展）
+        if guidance:
+            logger.info(f"[Phased] 收到 Research Guidance: {guidance[:100]}...")
+
+        # 调用现有的 _process_paragraphs
+        self._process_paragraphs()
+
+        # 返回 Research 数据
+        return {
+            'paragraphs': [
+                {
+                    'title': p.title,
+                    'latest_summary': p.research.latest_summary,
+                    'search_count': p.research.get_search_count()
+                }
+                for p in self.state.paragraphs
+            ],
+            'state_dict': self.state.to_dict(),
+            'research_summary': self._generate_research_summary()
+        }
+
+    def generate_report(self, research: Dict[str, Any]) -> str:
+        """
+        Report 阶段 - 基于 Research 生成报告
+
+        从 research['state_dict'] 恢复状态，调用 _generate_final_report()
+
+        Args:
+            research: Research 阶段返回的数据（必须包含 state_dict）
+
+        Returns:
+            最终报告内容
+        """
+        logger.info(f"[Phased] 开始 Report 阶段")
+
+        # 从 Research 恢复状态
+        state_dict = research.get('state_dict')
+        if not state_dict:
+            raise ValueError("Research 数据缺少 state_dict")
+        self.state = State.from_dict(state_dict)
+
+        # 调用现有的 _generate_final_report
+        return self._generate_final_report()
+
+    def execute_supplemental_research(self, research: Dict[str, Any], guidance: str) -> Dict[str, Any]:
+        """
+        补充研究 - 对所有段落执行额外一轮反思循环
+
+        Args:
+            research: Research 阶段返回的数据
+            guidance: Orchestrator 提供的补充研究指导
+
+        Returns:
+            更新后的 Research 数据字典
+        """
+        logger.info(f"[Phased] 开始补充研究: {guidance[:100]}...")
+
+        # 恢复状态
+        state_dict = research.get('state_dict')
+        if not state_dict:
+            raise ValueError("Research 数据缺少 state_dict")
+        self.state = State.from_dict(state_dict)
+
+        # 对每个已完成的段落执行额外反思
+        for i, paragraph in enumerate(self.state.paragraphs):
+            if paragraph.research.is_completed:
+                logger.info(f"[Phased] 补充研究段落 {i+1}: {paragraph.title}")
+                paragraph.research.is_completed = False
+                self._reflection_loop(i)
+                paragraph.research.mark_completed()
+
+        return {
+            'paragraphs': [
+                {
+                    'title': p.title,
+                    'latest_summary': p.research.latest_summary,
+                    'search_count': p.research.get_search_count()
+                }
+                for p in self.state.paragraphs
+            ],
+            'state_dict': self.state.to_dict(),
+            'research_summary': self._generate_research_summary(),
+            'supplemented': True
+        }
+
+    def _generate_research_summary(self) -> str:
+        """
+        辅助方法 - 生成研究摘要供 Orchestrator 评审
+
+        Returns:
+            研究摘要文本
+        """
+        summaries = []
+        for p in self.state.paragraphs:
+            summary = p.research.latest_summary[:500] if p.research.latest_summary else "(无内容)"
+            summaries.append(f"### {p.title}\n{summary}...")
+        return "\n\n".join(summaries)
+
 
 class AnspireSearchAgent(DeepSearchAgent):
     """调用Anspire搜索引擎的Deep Search Agent"""

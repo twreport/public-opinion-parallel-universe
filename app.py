@@ -82,6 +82,14 @@ if REPORT_ENGINE_AVAILABLE:
 else:
     logger.info("ReportEngine不可用，跳过接口注册")
 
+# 注册API v2 Blueprint（异步任务接口）
+try:
+    from api.v2 import api_v2
+    app.register_blueprint(api_v2)
+    logger.info("API v2 接口已注册 (/api/v2/*)")
+except ImportError as e:
+    logger.warning(f"API v2 模块导入失败: {e}")
+
 # 创建日志目录
 LOG_DIR = Path('logs')
 LOG_DIR.mkdir(exist_ok=True)

@@ -1,28 +1,26 @@
 """
-通用数据库工具（异步）
+通用数据库工具（同步版本）
 
-此模块提供基于 SQLAlchemy 2.x 异步引擎的数据库访问封装，支持 MySQL 与 PostgreSQL。
-数据模型定义位置：
-- 无（本模块仅提供连接与查询工具，不定义数据模型）
+此模块提供基于 SQLAlchemy 2.x 同步引擎的数据库访问封装，支持 MySQL 与 PostgreSQL。
+使用同步驱动以避免 Celery + gevent 环境下的 asyncio 事件循环冲突。
 """
 
 from __future__ import annotations
 from urllib.parse import quote_plus
-import asyncio
 import os
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 from InsightEngine.utils.config import settings
 
 __all__ = [
-    "get_async_engine",
+    "get_engine",
     "fetch_all",
 ]
 
 
-_engine: Optional[AsyncEngine] = None
+_engine: Optional[Engine] = None
 
 
 def _build_database_url() -> str:
@@ -39,18 +37,18 @@ def _build_database_url() -> str:
     password = quote_plus(password)
 
     if dialect in ("postgresql", "postgres"):
-        # PostgreSQL 使用 asyncpg 驱动
-        return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db_name}"
+        # PostgreSQL 使用 psycopg2 驱动
+        return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db_name}"
 
-    # 默认 MySQL 使用 aiomysql 驱动
-    return f"mysql+aiomysql://{user}:{password}@{host}:{port}/{db_name}"
+    # 默认 MySQL 使用 pymysql 驱动（同步）
+    return f"mysql+pymysql://{user}:{password}@{host}:{port}/{db_name}"
 
 
-def get_async_engine() -> AsyncEngine:
+def get_engine() -> Engine:
     global _engine
     if _engine is None:
         database_url: str = _build_database_url()
-        _engine = create_async_engine(
+        _engine = create_engine(
             database_url,
             pool_pre_ping=True,
             pool_recycle=1800,
@@ -58,13 +56,13 @@ def get_async_engine() -> AsyncEngine:
     return _engine
 
 
-async def fetch_all(query: str, params: Optional[Union[Iterable[Any], Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+def fetch_all(query: str, params: Optional[Union[Iterable[Any], Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """
-    执行只读查询并返回字典列表。
+    执行只读查询并返回字典列表（同步版本）。
     """
-    engine: AsyncEngine = get_async_engine()
-    async with engine.connect() as conn:
-        result = await conn.execute(text(query), params or {})
+    engine: Engine = get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params or {})
         rows = result.mappings().all()
         # 将 RowMapping 转换为普通字典
         return [dict(row) for row in rows]

@@ -13,7 +13,10 @@
 - [5. 搜索 API](#5-搜索-api)
 - [6. 报告引擎 API](#6-报告引擎-api)
 - [7. 知识图谱 API](#7-知识图谱-api)
-- [8. WebSocket 事件](#8-websocket-事件)
+- [8. 异步任务 API (v2)](#8-异步任务-api-v2)
+  - [执行模式](#执行模式)
+  - [Orchestrator 模式阶段进度](#orchestrator-模式阶段进度)
+- [9. WebSocket 事件](#9-websocket-事件)
 
 ---
 
@@ -686,7 +689,436 @@ data: {"type":"stage","task_id":"report_1705632000","payload":{"message":"正在
 
 ---
 
-## 8. WebSocket 事件
+## 8. 异步任务 API (v2)
+
+异步任务 API 提供"提交任务 + 轮询查询"模式，适用于长时间运行的分析任务。所有接口前缀为 `/api/v2`。
+
+### GET /api/v2/health
+
+健康检查端点，检查 Redis 连接和任务统计。
+
+**响应示例：**
+```json
+{
+  "status": "healthy",
+  "service": "BettaFish API v2",
+  "components": {
+    "redis": "healthy"
+  },
+  "task_stats": {
+    "pending": 2,
+    "running": 1,
+    "generating_report": 0,
+    "completed": 15,
+    "failed": 0,
+    "total": 18
+  }
+}
+```
+
+**status 可能的值：** `healthy` | `degraded`（Redis 连接失败时）
+
+---
+
+### POST /api/v2/analyze
+
+提交分析任务，立即返回任务 ID，不阻塞等待结果。
+
+**请求体：**
+```json
+{
+  "query": "武汉大学舆情分析",
+  "options": {
+    "mode": "phased",
+    "priority": "normal"
+  }
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 分析查询内容（最大 500 字符） |
+| `options.mode` | string | 否 | 执行模式：`phased`（默认，Orchestrator 模式）或 `standard`（直接并行模式） |
+| `options.priority` | string | 否 | 预留扩展字段 |
+
+**执行模式说明：**
+
+| 模式 | 说明 |
+|------|------|
+| `phased` | **Orchestrator 模式**（默认）：三阶段执行（Plan → Research → Report），每阶段由 Orchestrator 进行 LLM 决策评审，支持 guidance 指导和补充研究 |
+| `standard` | **标准模式**：三个 Agent 直接并行执行研究，完成后生成报告 |
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "task_id": "task_1706123456789",
+  "status": "pending",
+  "mode": "phased",
+  "message": "任务已提交（Orchestrator 模式）",
+  "poll_url": "/api/v2/task/task_1706123456789"
+}
+```
+
+**错误响应：**
+```json
+{
+  "success": false,
+  "error": "查询内容不能为空"
+}
+```
+
+---
+
+### GET /api/v2/task/{task_id}
+
+查询任务状态和进度。
+
+**路径参数：**
+- `task_id`: 任务 ID
+
+**响应示例（进行中）：**
+```json
+{
+  "task_id": "task_1706123456789_1",
+  "query": "武汉大学舆情分析",
+  "status": "running",
+  "progress": 45,
+  "created_at": "2026-01-24T10:00:00",
+  "updated_at": "2026-01-24T10:05:00",
+  "message": "Agent 正在执行研究..."
+}
+```
+
+**响应示例（已完成）：**
+```json
+{
+  "task_id": "task_1706123456789_1",
+  "query": "武汉大学舆情分析",
+  "status": "completed",
+  "progress": 100,
+  "created_at": "2026-01-24T10:00:00",
+  "updated_at": "2026-01-24T10:25:00",
+  "completed_at": "2026-01-24T10:25:00",
+  "message": "分析完成",
+  "result": {
+    "title": "武汉大学舆情分析分析报告",
+    "summary": ["发现 3 个主要舆情热点", "整体情感倾向偏正面"],
+    "available_formats": ["json", "html", "pdf", "md"]
+  },
+  "result_url": "/api/v2/task/task_1706123456789_1/result"
+}
+```
+
+**status 可能的值：**
+
+| 状态 | 说明 |
+|------|------|
+| `pending` | 任务已提交，等待执行 |
+| `running` | Agent 正在执行研究（标准模式） |
+| `phase1_plan` | Phase 1: Agent 正在生成研究计划（Orchestrator 模式） |
+| `orchestrating_plan` | Orchestrator 正在评审 Plan（Orchestrator 模式） |
+| `phase2_research` | Phase 2: Agent 正在执行研究（Orchestrator 模式） |
+| `orchestrating_research` | Orchestrator 正在评审 Research（Orchestrator 模式） |
+| `phase2_supplement` | Phase 2: 补充研究中（Orchestrator 模式，最多 1 轮） |
+| `phase3_report` | Phase 3: Agent 正在生成报告（Orchestrator 模式） |
+| `generating_report` | 正在生成最终报告（标准模式） |
+| `generating_final_report` | 正在生成最终报告（Orchestrator 模式） |
+| `completed` | 分析完成 |
+| `failed` | 任务执行失败 |
+
+---
+
+### GET /api/v2/task/{task_id}/progress
+
+获取任务各 Agent 的详细进度。
+
+**路径参数：**
+- `task_id`: 任务 ID
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "task_id": "task_1706123456789_1",
+  "status": "running",
+  "overall_progress": 45,
+  "agents": {
+    "query": {
+      "status": "completed",
+      "progress": 100,
+      "updated_at": "2026-01-24T10:05:00"
+    },
+    "media": {
+      "status": "running",
+      "progress": 50,
+      "updated_at": "2026-01-24T10:06:00"
+    },
+    "insight": {
+      "status": "pending",
+      "progress": 0
+    }
+  }
+}
+```
+
+---
+
+### GET /api/v2/task/{task_id}/phases
+
+获取任务的阶段性进度详情（仅适用于 Orchestrator 模式）。
+
+返回每个 Agent 的当前阶段、各阶段结果、Orchestrator 决策、Forum 讨论日志等。
+
+**路径参数：**
+- `task_id`: 任务 ID
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "task_id": "task_1706123456789",
+  "phases": {
+    "query": "research",
+    "media": "research",
+    "insight": "plan"
+  },
+  "plans": {
+    "query": {
+      "keywords": ["武汉大学", "舆情"],
+      "search_strategy": "broad",
+      "report_structure": ["introduction", "findings", "conclusion"]
+    },
+    "media": {
+      "media_types": ["video", "image"],
+      "keywords": ["武汉大学"]
+    },
+    "insight": {
+      "analysis_aspects": ["trends", "insights"],
+      "keywords": ["武汉大学"]
+    }
+  },
+  "research": {
+    "query": {
+      "result": "...",
+      "plan": {...},
+      "guidance_applied": true
+    }
+  },
+  "reports": {},
+  "supplement_round": 0,
+  "guidance": {
+    "plan": "建议增加时间维度的分析",
+    "research": null
+  },
+  "forum_log": [
+    {
+      "speaker": "system",
+      "content": "开始阶段性分析: 武汉大学舆情分析",
+      "timestamp": "2026-01-24T10:00:00"
+    },
+    {
+      "speaker": "query",
+      "content": "开始 Plan 阶段",
+      "timestamp": "2026-01-24T10:00:01"
+    },
+    {
+      "speaker": "orchestrator",
+      "content": "Plan 评审：approve",
+      "timestamp": "2026-01-24T10:01:00"
+    }
+  ]
+}
+```
+
+**响应字段说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `phases` | 各 Agent 当前所在阶段（plan/research/report） |
+| `plans` | 各 Agent 的 Plan 阶段输出（研究计划） |
+| `research` | 各 Agent 的 Research 阶段输出（研究结果） |
+| `reports` | 各 Agent 的 Report 阶段输出（报告内容） |
+| `supplement_round` | 补充研究轮次（0 表示未补充，最大 1） |
+| `guidance.plan` | Orchestrator 对 Plan 阶段的指导意见 |
+| `guidance.research` | Orchestrator 对 Research 阶段的指导意见 |
+| `forum_log` | 完整的 Forum 讨论日志（Blackboard 模式下替代 forum.log 文件） |
+
+---
+
+### GET /api/v2/task/{task_id}/result
+
+获取任务完整结果，支持多种输出格式。
+
+**路径参数：**
+- `task_id`: 任务 ID
+
+**查询参数：**
+- `format`: 输出格式，可选值：`json` | `html` | `md` | `pdf`（默认 `json`）
+
+#### format=json
+
+返回完整的 IR JSON 结构。
+
+**Content-Type:** `application/json`
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "data": {
+    "reportId": "task_1706123456789_1",
+    "metadata": {
+      "query": "武汉大学舆情分析",
+      "title": "武汉大学舆情分析分析报告",
+      "subtitle": "基于多源数据的综合分析",
+      "generatedAt": "2026-01-24T10:25:00"
+    },
+    "summary": {
+      "highlights": [
+        "发现 3 个主要舆情热点",
+        "整体情感倾向偏正面 (62%)",
+        "主要传播平台为微博和抖音"
+      ],
+      "kpis": [
+        {"label": "舆情热度", "value": "8.5/10", "trend": "up"},
+        {"label": "讨论量", "value": "12.3万", "trend": "up"},
+        {"label": "正面占比", "value": "62%", "trend": "stable"}
+      ]
+    },
+    "chapters": [
+      {
+        "chapterId": "S1",
+        "title": "报告摘要",
+        "blocks": [
+          {"type": "paragraph", "content": "本报告针对..."}
+        ]
+      }
+    ],
+    "sources": [
+      {"engine": "QueryEngine", "source": "综合网络搜索", "count": 15},
+      {"engine": "MediaEngine", "source": "社交媒体分析", "count": 20},
+      {"engine": "InsightEngine", "source": "深度洞察分析", "count": 8}
+    ]
+  }
+}
+```
+
+#### format=html
+
+返回渲染后的 HTML 报告。
+
+**Content-Type:** `text/html`
+
+**Content-Disposition:** `inline; filename="report_task_xxx.html"`
+
+#### format=md
+
+返回 Markdown 格式报告。
+
+**Content-Type:** `text/markdown`
+
+**Content-Disposition:** `attachment; filename="report_task_xxx.md"`
+
+#### format=pdf
+
+返回 PDF 格式报告（暂未实现）。
+
+**响应（501）：**
+```json
+{
+  "success": false,
+  "error": "PDF 格式暂未实现，请使用 json/html/md 格式"
+}
+```
+
+**错误响应（任务未完成）：**
+```json
+{
+  "success": false,
+  "error": "任务未完成，当前状态: running",
+  "status": "running",
+  "progress": 45
+}
+```
+
+---
+
+### GET /api/v2/tasks
+
+列出所有任务。
+
+**查询参数：**
+- `limit`: 返回数量限制（默认 50，最大 100）
+- `offset`: 偏移量（默认 0）
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "tasks": [
+    {
+      "task_id": "task_1706123456789_1",
+      "query": "武汉大学舆情分析",
+      "status": "completed",
+      "progress": 100,
+      "created_at": "2026-01-24T10:00:00",
+      "completed_at": "2026-01-24T10:25:00",
+      "message": "分析完成"
+    },
+    {
+      "task_id": "task_1706123456000_1",
+      "query": "新能源汽车市场分析",
+      "status": "running",
+      "progress": 30,
+      "created_at": "2026-01-24T09:50:00",
+      "message": "Agent 正在执行研究..."
+    }
+  ],
+  "total": 18,
+  "stats": {
+    "pending": 2,
+    "running": 1,
+    "completed": 15,
+    "failed": 0,
+    "total": 18
+  }
+}
+```
+
+---
+
+### 轮询最佳实践
+
+建议使用指数退避策略轮询任务状态：
+
+```javascript
+async function pollTask(taskId) {
+  const baseUrl = '/api/v2/task';
+  let delay = 1000; // 初始延迟 1 秒
+  const maxDelay = 10000; // 最大延迟 10 秒
+
+  while (true) {
+    const response = await fetch(`${baseUrl}/${taskId}`);
+    const data = await response.json();
+
+    if (data.status === 'completed') {
+      return data;
+    }
+    if (data.status === 'failed') {
+      throw new Error(data.error_message);
+    }
+
+    // 等待后重试，逐步增加延迟
+    await new Promise(resolve => setTimeout(resolve, delay));
+    delay = Math.min(delay * 1.5, maxDelay);
+  }
+}
+```
+
+---
+
+## 9. WebSocket 事件
 
 使用 Socket.IO 协议，连接地址与 HTTP 服务相同。
 
@@ -803,17 +1235,92 @@ socket.on('forum_message', (msg) => {
 | `ANSPIRE_API_KEY` | Anspire API Key |
 | `GRAPHRAG_ENABLED` | 是否启用知识图谱 |
 | `GRAPHRAG_MAX_QUERIES` | 图谱查询最大数量 |
+| `REDIS_HOST` | Redis 服务器地址（默认 127.0.0.1） |
+| `REDIS_PORT` | Redis 端口号（默认 6379） |
+| `REDIS_DB` | Redis 数据库编号（默认 10） |
+| `REDIS_PASSWORD` | Redis 密码（可选） |
 
 ---
 
 ## 备注
 
-1. **三引擎独立 API 尚未实现**：QueryEngine、InsightEngine、MediaEngine 目前仅通过 Streamlit 应用间接调用，尚无直接的 Flask API。如需独立对接，需后续开发。
+1. **异步任务 API (v2)**：`/api/v2/*` 接口使用 Celery + Redis 实现真正的异步任务处理，支持两种执行模式：
 
-2. **默认端口**：
+   **标准模式 (standard)**：
+   - 3 个 Agent（QueryEngine, MediaEngine, InsightEngine）直接并行执行
+   - 完成后自动触发报告生成
+
+   **Orchestrator 模式 (phased)**（默认）：
+   - 三阶段执行：Plan → Research → Report
+   - 每阶段由 Orchestrator 进行 LLM 决策评审
+   - 使用 Blackboard (Redis) 共享 Agent 间状态
+   - 支持 guidance 指导机制和补充研究（最多 1 轮）
+   - 通过 `/api/v2/task/{id}/phases` 获取详细阶段进度
+
+2. **Celery 服务启动**：需要先启动 Redis 和 Celery Worker：
+   ```bash
+   # 开发环境（推荐，高并发）
+   PYTHONPATH=/path/to/BettaFish celery -A celery_app worker --loglevel=info -Q celery,agents,orchestrator,report --pool=gevent --concurrency=30
+
+   # 或使用 prefork（默认）
+   PYTHONPATH=/path/to/BettaFish celery -A celery_app worker --loglevel=info -Q celery,agents,orchestrator,report --concurrency=4
+
+   # 使用 Docker Compose（生产环境）
+   docker-compose up -d
+
+   # 定时任务（可选）
+   celery -A celery_app beat --loglevel=info
+   ```
+
+   **队列说明：**
+   | 队列 | 任务类型 |
+   |------|---------|
+   | `celery` | 主编排任务 |
+   | `agents` | Agent 研究任务（plan/research/report） |
+   | `orchestrator` | Orchestrator LLM 决策任务 |
+   | `report` | 报告生成任务 |
+
+3. **Flower 监控面板**：访问 `http://localhost:5555` 查看 Celery 任务监控。
+
+4. **清除 Celery 残留任务**：开发调试时清除所有任务数据（队列、结果、Blackboard 状态、缓存）：
+   ```bash
+   # Python 版本（推荐）
+   python clear_celery_tasks.py              # 交互模式（会询问是否清除缓存）
+   python clear_celery_tasks.py --all        # 清除所有（包括缓存）
+   python clear_celery_tasks.py --cache-only # 仅清除查询缓存
+   python clear_celery_tasks.py --yes        # 跳过确认提示
+
+   # Bash 版本
+   ./clear_celery_tasks.sh                   # 交互模式
+   ```
+
+   **清除内容：**
+   - Celery 任务队列（celery, agents, orchestrator, report）
+   - Celery 任务结果（celery-task-meta-*）
+   - 自定义任务数据（task:* 包括 Blackboard 状态）
+   - 任务列表（tasks:all）
+   - 查询缓存（cache:query:* 可选）
+
+5. **三引擎独立 API 尚未实现**：QueryEngine、InsightEngine、MediaEngine 目前仅通过 Streamlit 应用间接调用，尚无直接的 Flask API。如需独立对接，需后续开发。
+
+5. **默认端口**：
    - Flask 主服务：5000
    - Insight Engine：8501
    - Media Engine：8502
    - Query Engine：8503
+   - Redis：6379
+   - Flower：5555
 
-3. **跨域支持**：Socket.IO 已配置 `cors_allowed_origins="*"`，HTTP API 可能需要额外配置 CORS。
+6. **跨域支持**：Socket.IO 已配置 `cors_allowed_origins="*"`，HTTP API 可能需要额外配置 CORS。
+
+7. **Redis 数据结构（Blackboard 模式）**：
+   | Key Pattern | 说明 | TTL |
+   |-------------|------|-----|
+   | `task:{id}:agent:{name}:phase` | Agent 当前阶段 | 7 天 |
+   | `task:{id}:agent:{name}:plan` | Plan 阶段输出 | 7 天 |
+   | `task:{id}:agent:{name}:research` | Research 阶段输出 | 7 天 |
+   | `task:{id}:agent:{name}:report` | Report 阶段输出 | 7 天 |
+   | `task:{id}:guidance:plan` | Plan 阶段 guidance | 7 天 |
+   | `task:{id}:guidance:research` | Research 阶段 guidance | 7 天 |
+   | `task:{id}:supplement:round` | 补充轮次计数 | 7 天 |
+   | `task:{id}:forum:log` | Forum 讨论记录 (List) | 7 天 |

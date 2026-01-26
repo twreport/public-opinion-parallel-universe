@@ -1,8 +1,27 @@
 version: "3.9"
 
 services:
+  # Redis - 消息队列和结果存储
+  redis:
+    image: redis:7-alpine
+    container_name: bettafish-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Flask API 服务（主应用）
   bettafish:
     image: ghcr.io/666ghj/bettafish:latest
+    # 本地开发使用 build
+    # build: .
     # Speed up mirror
     # image: ghcr.nju.edu.cn/666ghj/bettafish:latest
     container_name: bettafish
@@ -10,19 +29,81 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - STREAMLIT_SERVER_ENABLE_FILE_WATCHER=false
+      - REDIS_URL=redis://redis:6379/10
     ports:
       - "5000:5000"
       - "8501:8501"
       - "8502:8502"
       - "8503:8503"
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
       - ./final_reports:/app/final_reports
-      - ./.env:/app/.env  
+      - ./.env:/app/.env
       - ./insight_engine_streamlit_reports:/app/insight_engine_streamlit_reports
       - ./media_engine_streamlit_reports:/app/media_engine_streamlit_reports
       - ./query_engine_streamlit_reports:/app/query_engine_streamlit_reports
 
+  # Celery Worker - 执行异步任务
+  celery-worker:
+    image: ghcr.io/666ghj/bettafish:latest
+    # 本地开发使用 build
+    # build: .
+    container_name: bettafish-celery-worker
+    restart: unless-stopped
+    command: celery -A celery_app worker --loglevel=info --concurrency=3
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://redis:6379/10
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./final_reports:/app/final_reports
+      - ./.env:/app/.env
+      - ./insight_engine_streamlit_reports:/app/insight_engine_streamlit_reports
+      - ./media_engine_streamlit_reports:/app/media_engine_streamlit_reports
+      - ./query_engine_streamlit_reports:/app/query_engine_streamlit_reports
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  # Celery Beat - 定时任务调度
+  celery-beat:
+    image: ghcr.io/666ghj/bettafish:latest
+    # 本地开发使用 build
+    # build: .
+    container_name: bettafish-celery-beat
+    restart: unless-stopped
+    command: celery -A celery_app beat --loglevel=info
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://redis:6379/10
+    depends_on:
+      - redis
+      - celery-worker
+    volumes:
+      - ./.env:/app/.env
+
+  # Flower - Celery 监控面板
+  flower:
+    image: mher/flower:2.0
+    container_name: bettafish-flower
+    restart: unless-stopped
+    command: celery --broker=redis://redis:6379/10 flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/10
+    depends_on:
+      - redis
+      - celery-worker
+
+  # PostgreSQL 数据库
   db:
     image: postgres:15
     container_name: bettafish-db
@@ -37,3 +118,7 @@ services:
       - "${POSTGRES_PORT:-5444}:5432"
     volumes:
       - ./db_data:/var/lib/postgresql/data
+
+volumes:
+  redis_data:
+    driver: local

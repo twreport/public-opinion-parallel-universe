@@ -78,10 +78,27 @@ def with_retry(config: RetryConfig = None):
                     if attempt > 0:
                         logger.info(f"函数 {func.__name__} 在第 {attempt + 1} 次尝试后成功")
                     return result
-                    
+
                 except config.retry_on_exceptions as e:
                     last_exception = e
-                    
+
+                    # 检查是否是不应该重试的错误
+                    error_msg = str(e).lower()
+                    non_retryable_keywords = [
+                        'inappropriate content',  # 阿里云内容审查
+                        'content policy',         # 内容政策
+                        'content exists risk',    # DeepSeek 内容审查
+                        'sensitive content',      # 敏感内容
+                        'authentication',         # 认证失败
+                        'invalid api key',        # API key 无效
+                        'invalid_api_key',        # API key 无效（另一种格式）
+                        'unauthorized',           # 未授权
+                    ]
+
+                    if any(keyword in error_msg for keyword in non_retryable_keywords):
+                        logger.error(f"函数 {func.__name__} 遇到不可重试的错误: {str(e)}")
+                        raise e
+
                     if attempt == config.max_retries:
                         # 最后一次尝试也失败了
                         logger.error(f"函数 {func.__name__} 在 {config.max_retries + 1} 次尝试后仍然失败")
@@ -164,10 +181,24 @@ def with_graceful_retry(config: RetryConfig = None, default_return=None):
                     if attempt > 0:
                         logger.info(f"非关键API {func.__name__} 在第 {attempt + 1} 次尝试后成功")
                     return result
-                    
+
                 except config.retry_on_exceptions as e:
                     last_exception = e
-                    
+
+                    # 检查是否是不应该重试的错误
+                    error_msg = str(e).lower()
+                    non_retryable_keywords = [
+                        'inappropriate content',
+                        'content policy',
+                        'authentication',
+                        'invalid api key',
+                    ]
+
+                    if any(keyword in error_msg for keyword in non_retryable_keywords):
+                        logger.warning(f"非关键API {func.__name__} 遇到不可重试的错误: {str(e)}")
+                        logger.info(f"返回默认值以保证系统继续运行: {default_return}")
+                        return default_return
+
                     if attempt == config.max_retries:
                         # 最后一次尝试也失败了，返回默认值而不抛出异常
                         logger.warning(f"非关键API {func.__name__} 在 {config.max_retries + 1} 次尝试后仍然失败")

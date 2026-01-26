@@ -20,14 +20,14 @@ def get_latest_host_speech(log_dir: str = "logs") -> Optional[str]:
     """
     try:
         forum_log_path = Path(log_dir) / "forum.log"
-        
+
+        # 静默处理文件不存在的情况（Blackboard模式下不使用forum.log）
         if not forum_log_path.exists():
-            logger.debug("forum.log文件不存在")
             return None
-            
+
         with open(forum_log_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
-        
+
         # 从后往前查找最新的HOST发言
         host_speech = None
         for line in reversed(lines):
@@ -38,12 +38,11 @@ def get_latest_host_speech(log_dir: str = "logs") -> Optional[str]:
                 # 处理转义的换行符，还原为实际换行
                 host_speech = content.replace('\\n', '\n').strip()
                 break
-        
+
+        # 只在找到 HOST 发言时记录日志，否则静默返回
         if host_speech:
             logger.info(f"找到最新的HOST发言，长度: {len(host_speech)}字符")
-        else:
-            logger.debug("未找到HOST发言")
-            
+
         return host_speech
         
     except Exception as e:
@@ -63,11 +62,11 @@ def get_all_host_speeches(log_dir: str = "logs") -> List[Dict[str, str]]:
     """
     try:
         forum_log_path = Path(log_dir) / "forum.log"
-        
+
+        # 静默处理文件不存在的情况（Blackboard模式下不使用forum.log）
         if not forum_log_path.exists():
-            logger.debug("forum.log文件不存在")
             return []
-            
+
         with open(forum_log_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
         
@@ -105,10 +104,11 @@ def get_recent_agent_speeches(log_dir: str = "logs", limit: int = 5) -> List[Dic
     """
     try:
         forum_log_path = Path(log_dir) / "forum.log"
-        
+
+        # 静默处理文件不存在的情况（Blackboard模式下不使用forum.log）
         if not forum_log_path.exists():
             return []
-            
+
         with open(forum_log_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
         

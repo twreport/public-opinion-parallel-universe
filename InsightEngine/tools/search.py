@@ -26,7 +26,6 @@ V3.0 核心更新:
 import os
 import json
 from loguru import logger
-import asyncio
 from typing import List, Dict, Any, Optional, Literal
 from dataclasses import dataclass, field
 from ..utils.db import fetch_all
@@ -77,18 +76,8 @@ class MediaCrawlerDB:
         
     def _execute_query(self, query: str, params: tuple = None) -> List[Dict[str, Any]]:
         try:
-            # 获取或创建event loop
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            # 直接运行协程
-            return loop.run_until_complete(fetch_all(query, params))
+            # 直接调用同步版本的 fetch_all
+            return fetch_all(query, params)
         
         except Exception as e:
             logger.exception(f"数据库查询时发生错误: {e}")

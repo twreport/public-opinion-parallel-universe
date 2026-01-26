@@ -1,0 +1,5 @@
+# Celery 异步任务队列依赖
+# 使用 Redis 作为 Broker 和 Backend
+
+celery[redis]>=5.3.0
+redis>=4.5.0
