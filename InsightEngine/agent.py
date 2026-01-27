@@ -562,13 +562,16 @@ class DeepSearchAgent:
         logger.info(_message)
 
     def _process_paragraphs(self):
-        """处理所有段落"""
-        total_paragraphs = len(self.state.paragraphs)
+        """并行处理所有段落（使用 gevent）"""
+        import gevent
 
-        for i in range(total_paragraphs):
-            logger.info(
-                f"\n[步骤 2.{i + 1}] 处理段落: {self.state.paragraphs[i].title}"
-            )
+        total_paragraphs = len(self.state.paragraphs)
+        logger.info(f"\n[InsightEngine] 开始并行处理 {total_paragraphs} 个段落...")
+
+        def process_single_paragraph(i: int):
+            """处理单个段落的函数"""
+            paragraph_title = self.state.paragraphs[i].title
+            logger.info(f"\n[段落 {i+1}/{total_paragraphs}] 开始处理: {paragraph_title}")
             logger.info("-" * 50)
 
             try:
@@ -580,19 +583,31 @@ class DeepSearchAgent:
 
                 # 标记段落完成
                 self.state.paragraphs[i].research.mark_completed()
+                logger.info(f"[段落 {i+1}] ✅ 处理完成: {paragraph_title[:30]}...")
+                return True
             except Exception as e:
-                # 非致命性错误：跳过当前段落，继续处理其他段落
+                # 非致命性错误：跳过当前段落
                 error_msg = str(e)
-                if "inappropriate content" in error_msg.lower() or "content filter" in error_msg.lower():
-                    logger.warning(f"  ⚠️ 段落 {i+1} 触发内容安全审核，跳过该段落: {error_msg[:100]}")
+                if "inappropriate content" in error_msg.lower() or "content filter" in error_msg.lower() or "content exists risk" in error_msg.lower():
+                    logger.warning(f"[段落 {i+1}] ⚠️ 触发内容安全审核，跳过: {error_msg[:100]}")
                 else:
-                    logger.error(f"  ❌ 段落 {i+1} 处理失败，跳过该段落: {error_msg[:200]}")
-                # 标记段落为失败状态但继续执行
+                    logger.error(f"[段落 {i+1}] ❌ 处理失败，跳过: {error_msg[:200]}")
+                # 标记段落为失败状态
                 self.state.paragraphs[i].latest_summary = f"[该段落处理失败: {error_msg[:100]}]"
-                continue
+                return False
 
-            progress = (i + 1) / total_paragraphs * 100
-            logger.info(f"段落处理完成 ({progress:.1f}%)")
+        # 使用 gevent.spawn 并行处理所有段落
+        greenlets = [
+            gevent.spawn(process_single_paragraph, i)
+            for i in range(total_paragraphs)
+        ]
+
+        # 等待所有 greenlet 完成
+        gevent.joinall(greenlets)
+
+        # 统计结果
+        success_count = sum(1 for g in greenlets if g.value is True)
+        logger.info(f"\n[InsightEngine] 段落处理完成: {success_count}/{total_paragraphs} 成功")
 
     def _initial_search_and_summary(self, paragraph_index: int):
         """执行初始搜索和总结"""
